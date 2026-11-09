@@ -89,6 +89,11 @@ def create_course_row(state, rng, with_tree=True):
 
 def update_distance_score(state):
     """w11演習01：コースが1行進んだときに、1回だけ呼び出される。"""
+    if state["scroll_count"] + 1:
+        state["score"] += 1  # TODO: Stateの score に1点加算する処理を1行書こう。
+    
+    
+    
     # TODO: Stateの score に1点加算する処理を1行書こう。
     # ヒント：第4章で学んだ辞書の値の更新を利用する。
     pass
