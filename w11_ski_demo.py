@@ -41,6 +41,7 @@ def create_state(field_width, field_height, rng):
     half_width = min(19, max(13, (field_width - 12) // 2))
     state = {
         "status": STATUS_READY,
+        "difficulty": "normal",
         "x": field_width // 2,
         "y": max(3, int(field_height * 0.35)),
         "direction": 1,     # -1: 左、+1: 右。直進（0）は使わない。
@@ -82,10 +83,20 @@ def create_course_row(state, rng, with_tree=True):
     right = center + half
     tree = None
     tree_rate = min(0.52, 0.23 + (state["level"] - 1) * 0.055)
+    if state["difficulty"] == "hard":
+        tree_rate = tree_rate * 1.5
     if with_tree and rng.random() < tree_rate:
         tree = rng.randint(left + 3, right - 3)
 
-    return {"left": left, "right": right, "tree": tree}
+    coin = None
+    coin_rate = 0.05
+    if with_tree and rng.random() < coin_rate:
+        coin = rng.randint(left + 3, right - 3)
+    if coin == tree:
+        coin = None
+        
+
+    return {"left": left, "right": right, "tree": tree, "coin": coin}
 
 
 def update_distance_score(state):
@@ -125,6 +136,9 @@ def check_collision(state):
     elif row["tree"] == player_x:
         state["game_over_reason"] = "TREE!"
         state["status"] = STATUS_GAME_OVER
+    elif row["coin"] == player_x:
+        state["score"] += 100
+        row["coin"] = None  # コインを回収したら消す
 
 
 def update_game(state, dt, rng):
@@ -133,7 +147,10 @@ def update_game(state, dt, rng):
         return
 
     state["elapsed_time"] += dt
-    state["speed"] = state["base_speed"] + (state["level"] -1) * 0.15
+    if state["difficulty"] == "hard":
+        state["speed"] = state["base_speed"] + (state["level"] - 1) * 0.30
+    else:
+        state["speed"] = state["base_speed"] + (state["level"] -1) * 0.15
 
     # 毎フレームではなく、実際に1行進んだときだけ位置と距離を更新する。
     state["scroll_progress"] += 3.0 * state["speed"] * dt
@@ -147,6 +164,13 @@ def read_key(state, key):
     """キー入力をStateへ反映する。再起動要求なら True を返す。"""
     if key in (ord("q"), ord("Q")):
         return "QUIT"
+    if state["status"] == STATUS_READY:
+        if key in (ord("n"), ord("N")):
+            state["difficulty"] = "normal"
+        elif key in (ord("h"), ord("H")):
+            state["difficulty"] = "hard"
+        elif key == ord(" "):
+            state["status"] = STATUS_PLAYING
     if state["status"] == STATUS_GAME_OVER and key in (ord("r"), ord("R")):
         return "RESTART"
     if key == ord(" "):
@@ -186,7 +210,8 @@ def draw_game(screen, state):
         f"DIST {state['scroll_count']:05d} | TIME {mins:02d}:{seconds:02d}"
     )
     turn = "LEFT" if state["direction"] == -1 else "RIGHT"
-    info = f"SPEED {state['speed']:.2f}x | TURN {turn} | STATE {state['status']}"
+    difficulty = state["difficulty"].upper()
+    info = f"SPEED {state['speed']:.2f}x | TURN {turn} | STATE {state['status']} | DIFFICULTY {difficulty}"
     draw_line(screen, 0, hud, curses.A_BOLD)
     draw_line(screen, 1, info)
     screen.addnstr(2, offset, "=" * width, width)
@@ -200,6 +225,8 @@ def draw_game(screen, state):
             chars[x] = "*"
         if row["tree"] is not None:
             chars[row["tree"]] = "A"
+        if row["coin"] is not None:
+            chars[row["coin"]] = "@"
         if i == state["y"] and 0 <= player_x < width:
             chars[player_x] = "X" if state["status"] == STATUS_GAME_OVER else "O"
         screen.addnstr(FIELD_TOP + i, offset, "".join(chars), width)
