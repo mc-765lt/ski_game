@@ -45,6 +45,7 @@ def create_state(field_width, field_height, rng):
         "y": max(3, int(field_height * 0.35)),
         "direction": 1,     # -1: 左、+1: 右。直進（0）は使わない。
         "speed": 1.0,
+        "base_speed": 1.5,
         "elapsed_time": 0.0,   # 一時停止中は増えない
         "scroll_count": 0,    # コースが進んだ行数
         "score": 0,           # w11演習01で更新する
@@ -132,7 +133,7 @@ def update_game(state, dt, rng):
         return
 
     state["elapsed_time"] += dt
-    state["speed"] = 1.0 + (state["level"] - 1) * 0.15
+    state["speed"] = state["base_speed"] + (state["level"] -1) * 0.15
 
     # 毎フレームではなく、実際に1行進んだときだけ位置と距離を更新する。
     state["scroll_progress"] += 3.0 * state["speed"] * dt
