@@ -24,6 +24,8 @@ FPS = 30
 MIN_COLUMNS = 64
 MIN_LINES = 21
 MAX_FIELD_WIDTH = 68
+MIN_COURSE_HALF_WIDTH = 8
+NARROW_PER_LEVEL = 1
 FIELD_TOP = 3
 STATUS_READY = "READY"
 STATUS_PLAYING = "PLAYING"
@@ -56,6 +58,7 @@ def create_state(field_width, field_height, rng):
         "field_height": field_height,
         "course_center": field_width // 2,
         "course_half_width": half_width,
+        "initial_half_width": half_width,
         "rows": deque(),
         "game_over_reason": "",
     }
@@ -70,10 +73,12 @@ def create_course_row(state, rng, with_tree=True):
     """コースを1行生成する。木や崖の生成は講師提供部分。"""
     width = state["field_width"]
     half = state["course_half_width"]
+    target_half = max(MIN_COURSE_HALF_WIDTH, state["initial_half_width"] - (state["level"] - 1) * NARROW_PER_LEVEL)
+    half = min(half, target_half)  # レベルごとの目標幅を上限に、幅をランダムに変化させる。
 
     # 崖の幅とコース中心を急激に変化させず、通れる幅を確保する。
     if rng.random() < 0.13:
-        half = int(clamp(half + rng.choice([-1, 1]), 13, 21))
+        half = int(clamp(half + rng.choice([-1, 1]), MIN_COURSE_HALF_WIDTH, target_half))
     center = state["course_center"] + rng.choice([-1, 0, 0, 0, 0, 1])
     center = int(clamp(center, half + 3, width - half - 4))
     state["course_center"] = center
@@ -122,7 +127,6 @@ def move_course_one_row(state, rng):
     state["scroll_count"] += 1
     state["level"] = state["scroll_count"] // 100 + 1
 
-    # 演習対象の関数は「1行進むたび」に呼ばれる。
     update_distance_score(state)
 
 
@@ -151,6 +155,8 @@ def update_game(state, dt, rng):
         state["speed"] = state["base_speed"] + (state["level"] - 1) * 0.30
     else:
         state["speed"] = state["base_speed"] + (state["level"] -1) * 0.15
+    if state["speed"] > 5.0:
+        state["speed"] = 5.0
 
     # 毎フレームではなく、実際に1行進んだときだけ位置と距離を更新する。
     state["scroll_progress"] += 3.0 * state["speed"] * dt
