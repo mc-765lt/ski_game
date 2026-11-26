@@ -55,6 +55,7 @@ COIN_TRAIL_LENGTH = 4
 GATE_START = 18
 GATE_SPACING = 4  # 門と門の間に、方向転換できる3行を挟む
 GATE_PATTERNS = ((-2, 2, -2), (2, 0, -2), (2, -2, 2), (-2, 0, 2))
+LONG_SLALOM_LENGTH = (10, 15)
 CLEAN_BONUS_ROWS = 25
 CLEAN_BONUS_POINTS = 50
 DATA_DIR = Path(os.getenv("LOCALAPPDATA") or os.getenv("XDG_DATA_HOME") or Path.home() / ".local" / "share")
@@ -82,6 +83,8 @@ def create_state(field_width, field_height, rng, difficulty="normal"):
         "score": 0,           # w11演習01で更新する
         "coins_collected": 0,
         "coin_trail": deque(),
+        "slalom_path": deque(),
+        "next_long_slalom_section": 0,
         "personal_bests": None,
         "next_clean_bonus_row": CLEAN_BONUS_ROWS,
         "clean_bonus_points": 0,
@@ -107,13 +110,35 @@ def create_state(field_width, field_height, rng, difficulty="normal"):
     return state
 
 
+def plan_slalom(state, section, rng):
+    """1行ごとの門の中心位置を用意する。None は門と門の間の空き行。"""
+    path = state["slalom_path"]
+    if section < state["next_long_slalom_section"]:
+        for i, offset in enumerate(GATE_PATTERNS[section % len(GATE_PATTERNS)]):
+            if i:
+                path.extend([None] * (GATE_SPACING - 1))
+            path.append(offset)
+        return
+
+    # 長い区間は中央から入り、毎行1マスずつ曲がって左右2マスで切り返す。
+    offset = 0
+    direction = rng.choice((-1, 1))
+    for _ in range(rng.randint(*LONG_SLALOM_LENGTH)):
+        path.append(offset)
+        if abs(offset) == 2:
+            direction = -direction
+        offset += direction
+    state["next_long_slalom_section"] = section + rng.randint(2, 3)
+
+
 def create_course_row(state, rng, with_tree=True):
     """新しい1行にコースの境界、障害物、取得物を配置する。"""
     width = state["field_width"]
     section, phase = divmod(state["scroll_count"], SECTION_ROWS)
-    gate_offsets = GATE_PATTERNS[section % len(GATE_PATTERNS)]
-    gate_row = phase - GATE_START
-    in_gates = with_tree and 0 <= gate_row <= (len(gate_offsets) - 1) * GATE_SPACING
+    if with_tree and phase == GATE_START:
+        plan_slalom(state, section, rng)
+    in_gates = with_tree and bool(state["slalom_path"])
+    gate_offset = state["slalom_path"].popleft() if in_gates else None
     half = state["course_half_width"]
     target_half = max(MIN_COURSE_HALF_WIDTH, state["initial_half_width"] - (state["level"] - 1) * NARROW_PER_LEVEL)
     half = min(half, target_half)  # レベルごとの目標幅を上限に、幅をランダムに変化させる。
@@ -140,7 +165,8 @@ def create_course_row(state, rng, with_tree=True):
         step = rng.choice((-1, 0, 1))
         start = center + rng.randint(-1, 1) - step * (COIN_TRAIL_LENGTH // 2)
         state["coin_trail"].extend(start + i * step for i in range(COIN_TRAIL_LENGTH))
-    coin = state["coin_trail"].popleft() if state["coin_trail"] else None
+    opening = center + gate_offset if gate_offset is not None else None
+    coin = state["coin_trail"].popleft() if state["coin_trail"] else opening
     available = [x for x in range(left + 3, right - 2) if x != coin]
 
     tree = None
@@ -148,13 +174,11 @@ def create_course_row(state, rng, with_tree=True):
     tree_rate = min(0.52, 0.23 + (state["level"] - 1) * 0.055)
     if state["difficulty"] == "hard":
         tree_rate = tree_rate * 1.5
-    if in_gates:
-        if gate_row % GATE_SPACING == 0:
-            opening = center + gate_offsets[gate_row // GATE_SPACING]
-            tree, gate_post = opening - 2, opening + 2
-            available.remove(tree)
-            available.remove(gate_post)
-    elif rng.random() < tree_rate:
+    if opening is not None:
+        tree, gate_post = opening - 2, opening + 2
+        available.remove(tree)
+        available.remove(gate_post)
+    elif not in_gates and rng.random() < tree_rate:
         tree_spaces = [x for x in available if coin is None or abs(x - coin) > PICKUP_HALF_WIDTH]
         tree = rng.choice(tree_spaces)
         available.remove(tree)
