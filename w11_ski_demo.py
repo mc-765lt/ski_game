@@ -26,7 +26,8 @@ MIN_LINES = 21
 MAX_FIELD_WIDTH = 68
 MIN_COURSE_HALF_WIDTH = 8
 NARROW_PER_LEVEL = 1
-FIELD_TOP = 3
+FIELD_TOP = 4
+FOOTER_HEIGHT = 5  # 凡例2行、状態、操作説明、最下行の余白
 STATUS_READY = "READY"
 STATUS_PLAYING = "PLAYING"
 STATUS_PAUSED = "PAUSED"
@@ -303,16 +304,75 @@ def read_key(state, key):
     return None
 
 
-def draw_line(screen, y, text, style=0):
-    """右下隅への書き込みによるcursesエラーを避けて表示する。"""
+def monochrome_styles():
+    """色が使えない端末でも、自機や重要な表示を区別する。"""
+    return {
+        "normal": 0, "muted": curses.A_DIM,
+        "danger": curses.A_BOLD, "coin": curses.A_BOLD,
+        "S": curses.A_BOLD, "M": curses.A_BOLD, "+": curses.A_BOLD,
+        "player": curses.A_BOLD | curses.A_REVERSE,
+    }
+
+
+def setup_colors():
+    """障害物は赤、取得物は種類ごとの色、自機は青地にする。"""
+    styles = monochrome_styles()
+    try:
+        if not curses.has_colors():
+            return styles
+        curses.start_color()
+        background = curses.COLOR_BLACK
+        try:
+            curses.use_default_colors()
+            background = -1
+        except curses.error:
+            pass
+        palette = [
+            ("danger", curses.COLOR_RED, background),
+            ("coin", curses.COLOR_YELLOW, background),
+            ("S", curses.COLOR_CYAN, background),
+            ("M", curses.COLOR_MAGENTA, background),
+            ("+", curses.COLOR_GREEN, background),
+            ("player", curses.COLOR_WHITE, curses.COLOR_BLUE),
+        ]
+        colored = {}
+        for pair_id, (name, foreground, bg) in enumerate(palette, start=1):
+            curses.init_pair(pair_id, foreground, bg)
+            colored[name] = curses.color_pair(pair_id) | curses.A_BOLD
+        styles.update(colored)
+    except curses.error:
+        # 色の初期化に失敗しても、文字と凡例だけでプレイできる。
+        pass
+    return styles
+
+
+def draw_text(screen, y, x, text, style=0):
+    """半角文字で表示し、右端と最下行には書き込まない。"""
     rows, cols = screen.getmaxyx()
-    if 0 <= y < rows - 1 and cols >= 2:
-        screen.addnstr(y, 1, str(text), cols - 2, style)
+    if not (0 <= y < rows - 1 and 0 <= x < cols - 1):
+        return x
+    # Windowsのcursesでは全角文字の幅が不安定なため、UIはASCIIで統一。
+    clipped = str(text)[:cols - x - 1]
+    if clipped:
+        screen.addstr(y, x, clipped, style)
+    return x + len(clipped)
 
 
-def draw_game(screen, state):
+def draw_parts(screen, y, x, parts):
+    """同じ行に、色の異なる文字列を並べる。"""
+    for text, style in parts:
+        x = draw_text(screen, y, x, text, style)
+
+
+def draw_line(screen, y, text, style=0):
+    draw_text(screen, y, 1, text, style)
+
+
+def draw_game(screen, state, styles=None):
     """Stateの内容を読み取り、文字で画面を再描画する。"""
     screen.erase()
+    if styles is None:
+        styles = monochrome_styles()
     rows, cols = screen.getmaxyx()
     width = state["field_width"]
     offset = (cols - width) // 2
@@ -324,56 +384,94 @@ def draw_game(screen, state):
 
     t = state["elapsed_time"]
     mins, seconds = divmod(int(t), 60)
-    hud = (
-        f"LV {state['level']:02d} | SCORE {state['score']:05d} | "
-        f"DIST {state['scroll_count']:05d} | TIME {mins:02d}:{seconds:02d}"
+    # 最優先のライフを左上に固定し、失った分は空の枠にする。
+    life_style = styles["+"] if state["lives"] == MAX_LIVES else (
+        styles["coin"] if state["lives"] > 1 else styles["danger"]
     )
+    life_parts = [("LIFE ", curses.A_BOLD)]
+    for index in range(MAX_LIVES):
+        full = index < state["lives"]
+        life_parts.append(("[#]" if full else "[ ]", life_style if full else styles["muted"]))
+    life_parts.extend([
+        (f" {state['lives']}/{MAX_LIVES}", life_style),
+        (f"  SCORE {state['score']:05d}  LV {state['level']:02d}", curses.A_BOLD),
+    ])
+    if state["lives"] == 1:
+        life_parts.append(("  LOW!", styles["danger"]))
+    draw_parts(screen, 0, 1, life_parts)
+
+    slow = f"{state['slow_timer']:.1f}s" if state["slow_timer"] > 0 else "--"
+    magnet = f"{state['magnet_timer']:.1f}s" if state["magnet_timer"] > 0 else "--"
+    effect_parts = [
+        ("S SLOW x0.5: ", styles["S"]),
+        (slow, styles["S"] if state["slow_timer"] > 0 else styles["muted"]),
+        ("    M MAGNET: ", styles["M"]),
+        (magnet, styles["M"] if state["magnet_timer"] > 0 else styles["muted"]),
+    ]
+    if state["invincible_timer"] > 0 and state["status"] != STATUS_GAME_OVER:
+        effect_parts.append((f"    SAFE {state['invincible_timer']:.1f}s", styles["coin"]))
+    draw_parts(screen, 1, 1, effect_parts)
+
     turn = "LEFT" if state["direction"] == -1 else "RIGHT"
     difficulty = state["difficulty"].upper()
-    info = f"SPEED {state['speed']:.2f}x | TURN {turn} | STATE {state['status']} | DIFFICULTY {difficulty}"
-    draw_line(screen, 0, hud, curses.A_BOLD)
-    draw_line(screen, 1, info)
-    screen.addnstr(2, offset, "=" * width, width)
-    effects = (
-        f"LIFE {state['lives']}/{MAX_LIVES} | "
-        f"S {state['slow_timer']:.1f}s | M {state['magnet_timer']:.1f}s"
+    info = (
+        f"DIST {state['scroll_count']:05d}  TIME {mins:02d}:{seconds:02d}  "
+        f"SPEED {state['speed']:.2f}x  {turn}  {difficulty}"
     )
-    draw_line(screen, rows - 4, effects, curses.A_BOLD)
+    draw_line(screen, 2, info, styles["muted"])
+    draw_text(screen, FIELD_TOP - 1, offset, "-" * width, styles["muted"])
 
     player_x = int(round(state["x"]))
     for i, row in enumerate(state["rows"]):
-        chars = [" "] * width
-        for x in range(0, row["left"] + 1):
-            chars[x] = "*"
-        for x in range(row["right"], width):
-            chars[x] = "*"
+        y = FIELD_TOP + i
+        # コース外を記号で埋めず、危険な境界だけを描画する。
+        draw_text(screen, y, field_offset + row["left"], "*", styles["danger"])
+        draw_text(screen, y, field_offset + row["right"], "*", styles["danger"])
         if row["tree"] is not None:
-            chars[row["tree"]] = "A"
+            draw_text(screen, y, field_offset + row["tree"], "A", styles["danger"])
         if row["coin"] is not None:
-            chars[row["coin"]] = "@"
+            draw_text(screen, y, field_offset + row["coin"], "@", styles["coin"])
         if row["item"] is not None:
-            chars[row["item"]["x"]] = row["item"]["kind"]
+            item = row["item"]
+            draw_text(screen, y, field_offset + item["x"], item["kind"], styles[item["kind"]])
         if row["snowball"] is not None:
-            chars[int(round(row["snowball"]["x"]))] = "o"
+            snow_x = int(round(row["snowball"]["x"]))
+            draw_text(screen, y, field_offset + snow_x, "o", styles["danger"])
         if i == state["y"] and 0 <= player_x < width:
             player_icon = "O"
             if state["status"] == STATUS_GAME_OVER:
                 player_icon = "X"
             elif state["invincible_timer"] > 0 and int(state["elapsed_time"] * 10) % 2:
                 player_icon = "."  # 無敵中は点滅
-            chars[player_x] = player_icon
-        screen.addnstr(FIELD_TOP + i, field_offset, "".join(chars), width)
+            player_style = styles["danger"] | curses.A_REVERSE if state["status"] == STATUS_GAME_OVER else styles["player"]
+            draw_text(screen, y, field_offset + player_x, player_icon, player_style)
+
+    # 凡例の文字・色をフィールドと一致させ、プレイ中も常に表示する。
+    draw_parts(screen, rows - 5, 1, [
+        ("AVOID (-1 LIFE): ", styles["danger"]),
+        ("A TREE  o SNOWBALL  * CLIFF", styles["danger"]),
+        ("  |  ", styles["normal"]),
+        ("O", styles["player"]), (" YOU", styles["normal"]),
+    ])
+    draw_parts(screen, rows - 4, 1, [
+        ("GET: ", curses.A_BOLD),
+        ("@ +100  ", styles["coin"]),
+        ("S SLOW(5s)  ", styles["S"]),
+        ("M MAGNET(8s)  ", styles["M"]),
+        ("+ HEAL(+1)", styles["+"]),
+    ])
 
     if state["status"] == STATUS_READY:
-        message = "READY! Press SPACE to start"
+        message = "SPACE: start  |  N: normal / H: hard"
     elif state["status"] == STATUS_PAUSED:
         message = "PAUSED - Press SPACE to resume"
     elif state["status"] == STATUS_GAME_OVER:
         message = f"GAME OVER ({state['game_over_reason']}) - R to restart"
     else:
-        message = "Avoid A / * / o | Items: S=slow M=magnet +=life"
-    draw_line(screen, rows - 3, message, curses.A_BOLD)
-    draw_line(screen, rows - 2, "LEFT/RIGHT: switch turn | SPACE: start/pause | R: restart | Q: quit")
+        message = "S: half speed / M: coin magnet / +: restore life"
+    message_style = styles["danger"] if state["status"] == STATUS_GAME_OVER else curses.A_BOLD
+    draw_line(screen, rows - 3, message, message_style)
+    draw_line(screen, rows - 2, "LEFT/RIGHT: turn | SPACE: start/pause/resume | Q: quit", styles["muted"])
     screen.refresh()
 
 
@@ -385,6 +483,7 @@ def run(screen):
         pass
     screen.keypad(True)
     screen.nodelay(True)
+    styles = setup_colors()
 
     rng = random.Random()
     state = None
@@ -414,7 +513,7 @@ def run(screen):
         size = (height, width)
         if state is None or size != current_size:
             field_width = min(MAX_FIELD_WIDTH, width - 4)
-            field_height = height - 7
+            field_height = height - FIELD_TOP - FOOTER_HEIGHT
             state = create_state(field_width, field_height, rng)
             current_size = size
 
@@ -426,7 +525,7 @@ def run(screen):
             state["status"] = STATUS_PLAYING
 
         update_game(state, dt, rng)
-        draw_game(screen, state)
+        draw_game(screen, state, styles)
         time.sleep(1.0 / FPS)
 
 
