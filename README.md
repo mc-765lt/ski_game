@@ -14,7 +14,7 @@
 VS Codeでゲームのフォルダーを開き、**「ターミナル」→「新しいターミナル」**を選びます。最初の1回だけ、Windows用の描画ライブラリをインストールします。
 
 ```powershell
-py -m pip install windows-curses
+py -m pip install -r requirements.txt
 ```
 
 ## 起動方法
