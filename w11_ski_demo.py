@@ -55,6 +55,8 @@ COIN_TRAIL_LENGTH = 4
 GATE_START = 18
 GATE_SPACING = 4  # 門と門の間に、方向転換できる3行を挟む
 GATE_PATTERNS = ((-2, 2, -2), (2, 0, -2), (2, -2, 2), (-2, 0, 2))
+CLEAN_BONUS_ROWS = 25
+CLEAN_BONUS_POINTS = 50
 DATA_DIR = Path(os.getenv("LOCALAPPDATA") or os.getenv("XDG_DATA_HOME") or Path.home() / ".local" / "share")
 RECORDS_PATH = DATA_DIR / "w11_SkiGame" / "records.sqlite3"
 
@@ -81,6 +83,8 @@ def create_state(field_width, field_height, rng, difficulty="normal"):
         "coins_collected": 0,
         "coin_trail": deque(),
         "personal_bests": None,
+        "next_clean_bonus_row": CLEAN_BONUS_ROWS,
+        "clean_bonus_points": 0,
         "level": 1,           # 100行進むごとに上昇
         "scroll_progress": 0.0,
         "field_width": field_width,
@@ -201,6 +205,7 @@ def take_damage(state, reason):
     if state["status"] != STATUS_PLAYING or state["invincible_timer"] > 0:
         return
     state["lives"] = max(0, state["lives"] - 1)
+    state["next_clean_bonus_row"] = state["scroll_count"] + CLEAN_BONUS_ROWS
     state["invincible_timer"] = INVINCIBLE_DURATION
     state["shake_timer"] = SHAKE_DURATION
     if state["lives"] == 0:
@@ -312,6 +317,11 @@ def update_game(state, dt, rng):
             state["scroll_progress"] -= 1.0
             move_course_one_row(state, rng)
             check_collision(state)
+            # 到達した行の衝突判定を済ませてから、無傷で滑り切った区間を加点する。
+            if state["scroll_count"] == state["next_clean_bonus_row"]:
+                state["score"] += CLEAN_BONUS_POINTS
+                state["clean_bonus_points"] += CLEAN_BONUS_POINTS
+                state["next_clean_bonus_row"] += CLEAN_BONUS_ROWS
 
 
 def read_key(state, key):
@@ -436,6 +446,7 @@ def draw_results(screen, state, styles):
                ("COINS", state["coins_collected"]))
     for i, ((label, value), best) in enumerate(zip(metrics, bests)):
         draw_text(screen, y + 4 + i, x, f"{label:12}{value:>10}{best:>12}")
+    draw_text(screen, y + 8, x, f"No-hit bonus in score: +{state['clean_bonus_points']}")
     if state["personal_bests"] is None:
         draw_text(screen, y + 9, x, "Best records unavailable", styles["muted"])
     draw_text(screen, y + 12, x, "R  Race again       Q  Quit", curses.A_BOLD)
@@ -546,7 +557,9 @@ def draw_game(screen, state, styles=None):
     elif state["status"] == STATUS_GAME_OVER:
         message = f"GAME OVER ({state['game_over_reason']}) - R to restart"
     else:
-        message = "S: half speed / M: coin magnet / +: restore life"
+        rows_to_bonus = state["next_clean_bonus_row"] - state["scroll_count"]
+        message = (f"NO-HIT {CLEAN_BONUS_ROWS - rows_to_bonus}/{CLEAN_BONUS_ROWS} rows"
+                   f"   +{CLEAN_BONUS_POINTS} at {CLEAN_BONUS_ROWS}   Earned +{state['clean_bonus_points']}")
     message_style = styles["danger"] if state["status"] == STATUS_GAME_OVER else curses.A_BOLD
     draw_line(screen, rows - 3, message, message_style)
     draw_line(screen, rows - 2, "LEFT/RIGHT: turn | SPACE: start/pause/resume | Q: quit", styles["muted"])
