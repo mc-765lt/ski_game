@@ -32,6 +32,18 @@ STATUS_PLAYING = "PLAYING"
 STATUS_PAUSED = "PAUSED"
 STATUS_GAME_OVER = "GAME_OVER"
 
+# アイテム・ライフ・雪玉の設定（時間の単位は秒）
+MAX_LIVES = 3
+SLOW_DURATION = 5.0
+SLOW_FACTOR = 0.5
+MAGNET_DURATION = 8.0
+MAGNET_RADIUS = 4  # 縦横の距離の合計が4マス以内
+INVINCIBLE_DURATION = 1.5
+SHAKE_DURATION = 0.35
+SNOWBALL_SPEED = 5.0  # 1秒間に横へ進むマス数
+SNOWBALL_RATE = 0.12
+ITEM_RATE = 0.08
+
 
 def clamp(value, minimum, maximum):
     """値が指定範囲からはみ出さないようにする。"""
@@ -61,6 +73,11 @@ def create_state(field_width, field_height, rng):
         "initial_half_width": half_width,
         "rows": deque(),
         "game_over_reason": "",
+        "lives": MAX_LIVES,
+        "slow_timer": 0.0,
+        "magnet_timer": 0.0,
+        "invincible_timer": 0.0,
+        "shake_timer": 0.0,
     }
 
     # 開始直後の画面は障害物なし。新しく現れるコースから木を生成する。
@@ -101,7 +118,23 @@ def create_course_row(state, rng, with_tree=True):
         coin = None
         
 
-    return {"left": left, "right": right, "tree": tree, "coin": coin}
+    # 初期画面には追加の障害物やアイテムも出さない。
+    occupied = {x for x in (tree, coin) if x is not None}
+    available = [x for x in range(left + 3, right - 2) if x not in occupied]
+    snowball = None
+    if with_tree and available and rng.random() < SNOWBALL_RATE:
+        snow_x = rng.choice(available)
+        available.remove(snow_x)
+        snowball = {"x": float(snow_x), "direction": rng.choice([-1, 1])}
+
+    item = None
+    if with_tree and available and rng.random() < ITEM_RATE:
+        item = {"x": rng.choice(available), "kind": rng.choice(["S", "M", "+"])}
+
+    return {
+        "left": left, "right": right, "tree": tree, "coin": coin,
+        "snowball": snowball, "item": item,
+    }
 
 
 def update_distance_score(state):
@@ -130,40 +163,117 @@ def move_course_one_row(state, rng):
     update_distance_score(state)
 
 
+def take_damage(state, reason):
+    """被弾後1.5秒間は追加ダメージを受けない。"""
+    if state["status"] != STATUS_PLAYING or state["invincible_timer"] > 0:
+        return
+    state["lives"] = max(0, state["lives"] - 1)
+    state["invincible_timer"] = INVINCIBLE_DURATION
+    state["shake_timer"] = SHAKE_DURATION
+    if state["lives"] == 0:
+        state["game_over_reason"] = reason
+        state["status"] = STATUS_GAME_OVER
+
+
+def collect_item(state, row):
+    """アイテムを取得。同じ効果の再取得時は残り時間を戻す。"""
+    item = row["item"]
+    if item is None or item["x"] != int(round(state["x"])):
+        return
+    if item["kind"] == "S":
+        state["slow_timer"] = SLOW_DURATION
+    elif item["kind"] == "M":
+        state["magnet_timer"] = MAGNET_DURATION
+    elif item["kind"] == "+":
+        state["lives"] = min(MAX_LIVES, state["lives"] + 1)
+    row["item"] = None
+
+
+def collect_coins(state):
+    """通常は接触で回収。磁石使用中は周囲4マスまで回収。"""
+    player_x = int(round(state["x"]))
+    radius = MAGNET_RADIUS if state["magnet_timer"] > 0 else 0
+    for y, row in enumerate(state["rows"]):
+        if row["coin"] is None:
+            continue
+        distance = abs(row["coin"] - player_x) + abs(y - state["y"])
+        if distance <= radius:
+            state["score"] += 100
+            row["coin"] = None
+
+
 def check_collision(state):
-    """現在のプレイヤー位置に崖または木があるか判定する。"""
+    """崖・木・雪玉への接触とアイテム取得を判定する。"""
+    if state["status"] != STATUS_PLAYING:
+        return
     player_x = int(round(state["x"]))
     row = state["rows"][state["y"]]
+    snowball = row["snowball"]
     if player_x <= row["left"] or player_x >= row["right"]:
-        state["game_over_reason"] = "CLIFF!"
-        state["status"] = STATUS_GAME_OVER
+        take_damage(state, "CLIFF!")
+        # 崖に触れたら内側へ戻し、方向もコース内側へ変える。
+        state["x"] = int(clamp(player_x, row["left"] + 1, row["right"] - 1))
+        state["direction"] = 1 if player_x <= row["left"] else -1
     elif row["tree"] == player_x:
-        state["game_over_reason"] = "TREE!"
-        state["status"] = STATUS_GAME_OVER
-    elif row["coin"] == player_x:
-        state["score"] += 100
-        row["coin"] = None  # コインを回収したら消す
+        take_damage(state, "TREE!")
+    elif snowball is not None and int(round(snowball["x"])) == player_x:
+        take_damage(state, "SNOWBALL!")
+
+    if state["status"] == STATUS_PLAYING:
+        collect_item(state, row)
+        collect_coins(state)
+
+
+def update_snowballs(state, dt, speed_factor):
+    """雪玉は横へ移動し、その行の崖の手前で折り返す。"""
+    for row in state["rows"]:
+        snowball = row["snowball"]
+        if snowball is None:
+            continue
+        snowball["x"] += snowball["direction"] * SNOWBALL_SPEED * speed_factor * dt
+        left, right = row["left"] + 1, row["right"] - 1
+        if snowball["x"] <= left:
+            snowball["x"] = float(left)
+            snowball["direction"] = 1
+        elif snowball["x"] >= right:
+            snowball["x"] = float(right)
+            snowball["direction"] = -1
 
 
 def update_game(state, dt, rng):
-    """プレイ中だけ時間・位置・コースを更新する。"""
+    """短い時間刻みで更新し、移動中の雪玉との接触も検出する。"""
+    # 最後の被弾による揺れは、ゲームオーバー後も最後まで表示する。
+    if state["status"] == STATUS_GAME_OVER:
+        state["shake_timer"] = max(0.0, state["shake_timer"] - dt)
+        return
     if state["status"] != STATUS_PLAYING:
         return
 
-    state["elapsed_time"] += dt
-    if state["difficulty"] == "hard":
-        state["speed"] = state["base_speed"] + (state["level"] - 1) * 0.30
-    else:
-        state["speed"] = state["base_speed"] + (state["level"] -1) * 0.15
-    if state["speed"] > 5.0:
-        state["speed"] = 5.0
+    remaining = max(0.0, dt)
+    while remaining > 0 and state["status"] == STATUS_PLAYING:
+        step = min(remaining, 1.0 / 60.0)
+        remaining -= step
+        state["elapsed_time"] += step
+        for name in ("slow_timer", "magnet_timer", "invincible_timer", "shake_timer"):
+            state[name] = max(0.0, state[name] - step)
 
-    # 毎フレームではなく、実際に1行進んだときだけ位置と距離を更新する。
-    state["scroll_progress"] += 3.0 * state["speed"] * dt
-    while state["scroll_progress"] >= 1.0 and state["status"] == STATUS_PLAYING:
-        state["scroll_progress"] -= 1.0
-        move_course_one_row(state, rng)
         check_collision(state)
+        if state["status"] != STATUS_PLAYING:
+            break
+        speed_factor = SLOW_FACTOR if state["slow_timer"] > 0 else 1.0
+        level_gain = 0.30 if state["difficulty"] == "hard" else 0.15
+        normal_speed = min(5.0, state["base_speed"] + (state["level"] - 1) * level_gain)
+        state["speed"] = normal_speed * speed_factor
+
+        update_snowballs(state, step, speed_factor)
+        check_collision(state)
+        if state["status"] != STATUS_PLAYING:
+            break
+        state["scroll_progress"] += 3.0 * state["speed"] * step
+        while state["scroll_progress"] >= 1.0 and state["status"] == STATUS_PLAYING:
+            state["scroll_progress"] -= 1.0
+            move_course_one_row(state, rng)
+            check_collision(state)
 
 
 def read_key(state, key):
@@ -175,8 +285,6 @@ def read_key(state, key):
             state["difficulty"] = "normal"
         elif key in (ord("h"), ord("H")):
             state["difficulty"] = "hard"
-        elif key == ord(" "):
-            state["status"] = STATUS_PLAYING
     if state["status"] == STATUS_GAME_OVER and key in (ord("r"), ord("R")):
         return "RESTART"
     if key == ord(" "):
@@ -208,6 +316,11 @@ def draw_game(screen, state):
     rows, cols = screen.getmaxyx()
     width = state["field_width"]
     offset = (cols - width) // 2
+    # ゲームフィールドだけを左右に1文字揺らす。判定座標は変えない。
+    shake_x = 0
+    if state["shake_timer"] > 0:
+        shake_x = 1 if int(state["shake_timer"] * 30) % 2 == 0 else -1
+    field_offset = int(clamp(offset + shake_x, 0, max(0, cols - width - 1)))
 
     t = state["elapsed_time"]
     mins, seconds = divmod(int(t), 60)
@@ -221,6 +334,11 @@ def draw_game(screen, state):
     draw_line(screen, 0, hud, curses.A_BOLD)
     draw_line(screen, 1, info)
     screen.addnstr(2, offset, "=" * width, width)
+    effects = (
+        f"LIFE {state['lives']}/{MAX_LIVES} | "
+        f"S {state['slow_timer']:.1f}s | M {state['magnet_timer']:.1f}s"
+    )
+    draw_line(screen, rows - 4, effects, curses.A_BOLD)
 
     player_x = int(round(state["x"]))
     for i, row in enumerate(state["rows"]):
@@ -233,9 +351,18 @@ def draw_game(screen, state):
             chars[row["tree"]] = "A"
         if row["coin"] is not None:
             chars[row["coin"]] = "@"
+        if row["item"] is not None:
+            chars[row["item"]["x"]] = row["item"]["kind"]
+        if row["snowball"] is not None:
+            chars[int(round(row["snowball"]["x"]))] = "o"
         if i == state["y"] and 0 <= player_x < width:
-            chars[player_x] = "X" if state["status"] == STATUS_GAME_OVER else "O"
-        screen.addnstr(FIELD_TOP + i, offset, "".join(chars), width)
+            player_icon = "O"
+            if state["status"] == STATUS_GAME_OVER:
+                player_icon = "X"
+            elif state["invincible_timer"] > 0 and int(state["elapsed_time"] * 10) % 2:
+                player_icon = "."  # 無敵中は点滅
+            chars[player_x] = player_icon
+        screen.addnstr(FIELD_TOP + i, field_offset, "".join(chars), width)
 
     if state["status"] == STATUS_READY:
         message = "READY! Press SPACE to start"
@@ -244,7 +371,7 @@ def draw_game(screen, state):
     elif state["status"] == STATUS_GAME_OVER:
         message = f"GAME OVER ({state['game_over_reason']}) - R to restart"
     else:
-        message = "Avoid trees (A) and cliffs (*)!"
+        message = "Avoid A / * / o | Items: S=slow M=magnet +=life"
     draw_line(screen, rows - 3, message, curses.A_BOLD)
     draw_line(screen, rows - 2, "LEFT/RIGHT: switch turn | SPACE: start/pause | R: restart | Q: quit")
     screen.refresh()
