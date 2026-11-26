@@ -44,6 +44,7 @@ SHAKE_DURATION = 0.35
 SNOWBALL_SPEED = 5.0  # 1秒間に横へ進むマス数
 SNOWBALL_RATE = 0.12
 ITEM_RATE = 0.08
+PICKUP_HALF_WIDTH = 1  # アイテムとコインは同じ行の左右1マスまで取得可能
 
 
 def clamp(value, minimum, maximum):
@@ -177,9 +178,9 @@ def take_damage(state, reason):
 
 
 def collect_item(state, row):
-    """アイテムを取得。同じ効果の再取得時は残り時間を戻す。"""
+    """左右1マス以内のアイテムを取得。再取得時は効果時間を戻す。"""
     item = row["item"]
-    if item is None or item["x"] != int(round(state["x"])):
+    if item is None or abs(item["x"] - int(round(state["x"]))) > PICKUP_HALF_WIDTH:
         return
     if item["kind"] == "S":
         state["slow_timer"] = SLOW_DURATION
@@ -191,14 +192,18 @@ def collect_item(state, row):
 
 
 def collect_coins(state):
-    """通常は接触で回収。磁石使用中は周囲4マスまで回収。"""
+    """通常は同じ行の左右1マスまで回収。磁石使用中は周囲4マス。"""
     player_x = int(round(state["x"]))
-    radius = MAGNET_RADIUS if state["magnet_timer"] > 0 else 0
     for y, row in enumerate(state["rows"]):
         if row["coin"] is None:
             continue
-        distance = abs(row["coin"] - player_x) + abs(y - state["y"])
-        if distance <= radius:
+        dx = abs(row["coin"] - player_x)
+        dy = abs(y - state["y"])
+        if state["magnet_timer"] > 0:
+            in_range = dx + dy <= MAGNET_RADIUS
+        else:
+            in_range = dy == 0 and dx <= PICKUP_HALF_WIDTH
+        if in_range:
             state["score"] += 100
             row["coin"] = None
 
