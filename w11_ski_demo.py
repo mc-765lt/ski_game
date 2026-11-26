@@ -24,7 +24,7 @@ except ImportError:
 
 
 # 画面とゲームの基本設定
-FPS = 30
+FPS = 60  # 描画とキー入力の目標更新回数（毎秒）
 MIN_COLUMNS = 64
 MIN_LINES = 21
 MAX_FIELD_WIDTH = 68
@@ -604,11 +604,20 @@ def run(screen):
     state = None
     current_size = None
     last_time = time.monotonic()
+    frame_interval = 1.0 / FPS
+    next_frame = last_time
 
     while True:
         now = time.monotonic()
+        if now < next_frame:
+            time.sleep(next_frame - now)
+            now = time.monotonic()
         dt = min(0.10, now - last_time)
         last_time = now
+        next_frame += frame_interval
+        if next_frame <= now:
+            # 処理が1フレーム以上遅れた場合は、ここから次の描画を予約する。
+            next_frame = now + frame_interval
         height, width = screen.getmaxyx()
         key = screen.getch()
 
@@ -625,7 +634,6 @@ def run(screen):
             else:
                 state = None
             current_size = None
-            time.sleep(1.0 / FPS)
             continue
 
         size = (height, width)
@@ -650,7 +658,6 @@ def run(screen):
         if was_playing and state["status"] == STATUS_GAME_OVER:
             state["personal_bests"] = record_result(state)
         draw_game(screen, state, styles)
-        time.sleep(1.0 / FPS)
 
 
 def main():
