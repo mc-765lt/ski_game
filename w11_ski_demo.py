@@ -6,9 +6,13 @@ Windowsで curses が見つからない場合：py -m pip install windows-curses
 w11演習01：update_distance_score() の中だけを実装する。
 """
 
+import os
 import random
+import sqlite3
 import time
 from collections import deque
+from contextlib import closing
+from pathlib import Path
 
 try:
     import curses
@@ -45,6 +49,8 @@ SNOWBALL_SPEED = 5.0  # 1秒間に横へ進むマス数
 SNOWBALL_RATE = 0.12
 ITEM_RATE = 0.08
 PICKUP_HALF_WIDTH = 1  # アイテムとコインは同じ行の左右1マスまで取得可能
+DATA_DIR = Path(os.getenv("LOCALAPPDATA") or os.getenv("XDG_DATA_HOME") or Path.home() / ".local" / "share")
+RECORDS_PATH = DATA_DIR / "w11_SkiGame" / "records.sqlite3"
 
 
 def clamp(value, minimum, maximum):
@@ -52,12 +58,12 @@ def clamp(value, minimum, maximum):
     return max(minimum, min(value, maximum))
 
 
-def create_state(field_width, field_height, rng):
+def create_state(field_width, field_height, rng, difficulty="normal"):
     """新しいゲームを開始するためのStateを用意する。"""
     half_width = min(19, max(13, (field_width - 12) // 2))
     state = {
         "status": STATUS_READY,
-        "difficulty": "normal",
+        "difficulty": difficulty,
         "x": field_width // 2,
         "y": max(3, int(field_height * 0.35)),
         "direction": 1,     # -1: 左、+1: 右。直進（0）は使わない。
@@ -66,6 +72,8 @@ def create_state(field_width, field_height, rng):
         "elapsed_time": 0.0,   # 一時停止中は増えない
         "scroll_count": 0,    # コースが進んだ行数
         "score": 0,           # w11演習01で更新する
+        "coins_collected": 0,
+        "personal_bests": None,
         "level": 1,           # 100行進むごとに上昇
         "scroll_progress": 0.0,
         "field_width": field_width,
@@ -205,6 +213,7 @@ def collect_coins(state):
             in_range = dy == 0 and dx <= PICKUP_HALF_WIDTH
         if in_range:
             state["score"] += 100
+            state["coins_collected"] += 1
             row["coin"] = None
 
 
@@ -373,11 +382,51 @@ def draw_line(screen, y, text, style=0):
     draw_text(screen, y, 1, text, style)
 
 
+def record_result(state):
+    """完走した1回の成績から、難易度別に各項目の最高値を保存する。"""
+    try:
+        RECORDS_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with closing(sqlite3.connect(RECORDS_PATH, timeout=1.0)) as db, db:
+            db.execute("""CREATE TABLE IF NOT EXISTS bests (
+                difficulty TEXT PRIMARY KEY, score INTEGER, distance INTEGER, coins INTEGER
+            )""")
+            db.execute("""INSERT INTO bests (difficulty, score, distance, coins) VALUES (?, ?, ?, ?)
+                ON CONFLICT(difficulty) DO UPDATE SET
+                    score = MAX(score, excluded.score), distance = MAX(distance, excluded.distance),
+                    coins = MAX(coins, excluded.coins)""",
+                (state["difficulty"], state["score"], state["scroll_count"], state["coins_collected"]))
+            return db.execute("SELECT score, distance, coins FROM bests WHERE difficulty = ?",
+                              (state["difficulty"],)).fetchone()
+    except (OSError, sqlite3.Error):
+        return None
+
+
+def draw_results(screen, state, styles):
+    height, width = screen.getmaxyx()
+    x = (width - 36) // 2
+    y = (height - 13) // 2
+    draw_text(screen, y, x, f"RUN RESULTS   /   {state['difficulty'].upper()}", curses.A_BOLD)
+    draw_text(screen, y + 1, x, f"GAME OVER   {state['game_over_reason']}", styles["danger"])
+    draw_text(screen, y + 3, x, f"{'':12}{'THIS RUN':>10}{'BEST':>12}", styles["muted"])
+    bests = state["personal_bests"] or ("--", "--", "--")
+    metrics = (("SCORE", state["score"]), ("DISTANCE", state["scroll_count"]),
+               ("COINS", state["coins_collected"]))
+    for i, ((label, value), best) in enumerate(zip(metrics, bests)):
+        draw_text(screen, y + 4 + i, x, f"{label:12}{value:>10}{best:>12}")
+    if state["personal_bests"] is None:
+        draw_text(screen, y + 9, x, "Best records unavailable", styles["muted"])
+    draw_text(screen, y + 12, x, "R  Race again       Q  Quit", curses.A_BOLD)
+
+
 def draw_game(screen, state, styles=None):
     """Stateの内容を読み取り、文字で画面を再描画する。"""
     screen.erase()
     if styles is None:
         styles = monochrome_styles()
+    if state["status"] == STATUS_GAME_OVER and state["shake_timer"] <= 0:
+        draw_results(screen, state, styles)
+        screen.refresh()
+        return
     rows, cols = screen.getmaxyx()
     width = state["field_width"]
     offset = (cols - width) // 2
@@ -510,7 +559,10 @@ def run(screen):
             draw_line(screen, 3, f"Please enlarge to {MIN_COLUMNS}x{MIN_LINES} or more.")
             draw_line(screen, 5, "Press Q to quit.")
             screen.refresh()
-            state = None
+            if state and state["status"] == STATUS_GAME_OVER:
+                state["shake_timer"] = 0.0
+            else:
+                state = None
             current_size = None
             time.sleep(1.0 / FPS)
             continue
@@ -519,17 +571,23 @@ def run(screen):
         if state is None or size != current_size:
             field_width = min(MAX_FIELD_WIDTH, width - 4)
             field_height = height - FIELD_TOP - FOOTER_HEIGHT
-            state = create_state(field_width, field_height, rng)
+            if state and state["status"] == STATUS_GAME_OVER:
+                state["shake_timer"] = 0.0
+            else:
+                state = create_state(field_width, field_height, rng)
             current_size = size
 
         command = read_key(state, key)
         if command == "QUIT":
             break
         if command == "RESTART":
-            state = create_state(state["field_width"], state["field_height"], rng)
+            state = create_state(field_width, field_height, rng, state["difficulty"])
             state["status"] = STATUS_PLAYING
 
+        was_playing = state["status"] == STATUS_PLAYING
         update_game(state, dt, rng)
+        if was_playing and state["status"] == STATUS_GAME_OVER:
+            state["personal_bests"] = record_result(state)
         draw_game(screen, state, styles)
         time.sleep(1.0 / FPS)
 
