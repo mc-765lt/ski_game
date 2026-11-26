@@ -87,11 +87,4 @@ py w11_ski_demo.py
 - ベースゲームはプログラミング演習1の第11回配布教材「ASCIIスキーゲーム（学生版）」です。
 - 改良コードの実装とREADMEの作成にOpenAI Codexを利用しました。
 
-## 課題提出用のGit Bundle
 
-提出用のBundleが必要な場合は、変更をコミットしてから、ゲームのフォルダーで次のコマンドを実行します。`学籍番号` は自分の番号に置き換えてください。Bundleは1つ上のフォルダーに作成されます。
-
-```powershell
-git status
-git bundle create ../w11_学籍番号.bundle --all
-```
