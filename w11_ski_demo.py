@@ -52,6 +52,9 @@ PICKUP_HALF_WIDTH = 1  # アイテムとコインは同じ行の左右1マスま
 SECTION_ROWS = 40
 COIN_TRAIL_START = 4  # 各区間の5行目から
 COIN_TRAIL_LENGTH = 4
+GATE_START = 18
+GATE_SPACING = 4  # 門と門の間に、方向転換できる3行を挟む
+GATE_PATTERNS = ((-2, 2, -2), (2, 0, -2), (2, -2, 2), (-2, 0, 2))
 DATA_DIR = Path(os.getenv("LOCALAPPDATA") or os.getenv("XDG_DATA_HOME") or Path.home() / ".local" / "share")
 RECORDS_PATH = DATA_DIR / "w11_SkiGame" / "records.sqlite3"
 
@@ -103,14 +106,21 @@ def create_state(field_width, field_height, rng, difficulty="normal"):
 def create_course_row(state, rng, with_tree=True):
     """新しい1行にコースの境界、障害物、取得物を配置する。"""
     width = state["field_width"]
+    section, phase = divmod(state["scroll_count"], SECTION_ROWS)
+    gate_offsets = GATE_PATTERNS[section % len(GATE_PATTERNS)]
+    gate_row = phase - GATE_START
+    in_gates = with_tree and 0 <= gate_row <= (len(gate_offsets) - 1) * GATE_SPACING
     half = state["course_half_width"]
     target_half = max(MIN_COURSE_HALF_WIDTH, state["initial_half_width"] - (state["level"] - 1) * NARROW_PER_LEVEL)
     half = min(half, target_half)  # レベルごとの目標幅を上限に、幅をランダムに変化させる。
 
     # 崖の幅とコース中心を急激に変化させず、通れる幅を確保する。
-    if rng.random() < 0.13:
-        half = int(clamp(half + rng.choice([-1, 1]), MIN_COURSE_HALF_WIDTH, target_half))
-    center = state["course_center"] + rng.choice([-1, 0, 0, 0, 0, 1])
+    center = state["course_center"]
+    # 門の区間は中心を固定し、左右へ1マスずつ滑って次の開口部に届くようにする。
+    if not in_gates:
+        if rng.random() < 0.13:
+            half = int(clamp(half + rng.choice([-1, 1]), MIN_COURSE_HALF_WIDTH, target_half))
+        center += rng.choice([-1, 0, 0, 0, 0, 1])
     center = int(clamp(center, half + 3, width - half - 4))
     state["course_center"] = center
     state["course_half_width"] = half
@@ -118,11 +128,11 @@ def create_course_row(state, rng, with_tree=True):
     left = center - half
     right = center + half
     if not with_tree:
-        return {"left": left, "right": right, "tree": None, "coin": None,
+        return {"left": left, "right": right, "tree": None, "gate_post": None, "coin": None,
                 "snowball": None, "item": None}
 
     # 縦または斜めの4枚を、1行につき1枚ずつ画面に送り込む。
-    if state["scroll_count"] % SECTION_ROWS == COIN_TRAIL_START:
+    if phase == COIN_TRAIL_START:
         step = rng.choice((-1, 0, 1))
         start = center + rng.randint(-1, 1) - step * (COIN_TRAIL_LENGTH // 2)
         state["coin_trail"].extend(start + i * step for i in range(COIN_TRAIL_LENGTH))
@@ -130,15 +140,22 @@ def create_course_row(state, rng, with_tree=True):
     available = [x for x in range(left + 3, right - 2) if x != coin]
 
     tree = None
+    gate_post = None
     tree_rate = min(0.52, 0.23 + (state["level"] - 1) * 0.055)
     if state["difficulty"] == "hard":
         tree_rate = tree_rate * 1.5
-    if rng.random() < tree_rate:
+    if in_gates:
+        if gate_row % GATE_SPACING == 0:
+            opening = center + gate_offsets[gate_row // GATE_SPACING]
+            tree, gate_post = opening - 2, opening + 2
+            available.remove(tree)
+            available.remove(gate_post)
+    elif rng.random() < tree_rate:
         tree_spaces = [x for x in available if coin is None or abs(x - coin) > PICKUP_HALF_WIDTH]
         tree = rng.choice(tree_spaces)
         available.remove(tree)
     snowball = None
-    if coin is None and available and rng.random() < SNOWBALL_RATE:
+    if not in_gates and coin is None and available and rng.random() < SNOWBALL_RATE:
         snow_x = rng.choice(available)
         available.remove(snow_x)
         snowball = {"x": float(snow_x), "direction": rng.choice([-1, 1])}
@@ -148,7 +165,7 @@ def create_course_row(state, rng, with_tree=True):
         item = {"x": rng.choice(available), "kind": rng.choice(["S", "M", "+"])}
 
     return {
-        "left": left, "right": right, "tree": tree, "coin": coin,
+        "left": left, "right": right, "tree": tree, "gate_post": gate_post, "coin": coin,
         "snowball": snowball, "item": item,
     }
 
@@ -235,7 +252,7 @@ def check_collision(state):
         # 崖に触れたら内側へ戻し、方向もコース内側へ変える。
         state["x"] = int(clamp(player_x, row["left"] + 1, row["right"] - 1))
         state["direction"] = 1 if player_x <= row["left"] else -1
-    elif row["tree"] == player_x:
+    elif player_x in (row["tree"], row.get("gate_post")):
         take_damage(state, "TREE!")
     elif snowball is not None and int(round(snowball["x"])) == player_x:
         take_damage(state, "SNOWBALL!")
@@ -487,8 +504,9 @@ def draw_game(screen, state, styles=None):
         # コース外を記号で埋めず、危険な境界だけを描画する。
         draw_text(screen, y, field_offset + row["left"], "*", styles["danger"])
         draw_text(screen, y, field_offset + row["right"], "*", styles["danger"])
-        if row["tree"] is not None:
-            draw_text(screen, y, field_offset + row["tree"], "A", styles["danger"])
+        for tree_x in (row["tree"], row.get("gate_post")):
+            if tree_x is not None:
+                draw_text(screen, y, field_offset + tree_x, "A", styles["danger"])
         if row["coin"] is not None:
             draw_text(screen, y, field_offset + row["coin"], "@", styles["coin"])
         if row["item"] is not None:
