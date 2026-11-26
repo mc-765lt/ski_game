@@ -49,6 +49,9 @@ SNOWBALL_SPEED = 5.0  # 1秒間に横へ進むマス数
 SNOWBALL_RATE = 0.12
 ITEM_RATE = 0.08
 PICKUP_HALF_WIDTH = 1  # アイテムとコインは同じ行の左右1マスまで取得可能
+SECTION_ROWS = 40
+COIN_TRAIL_START = 4  # 各区間の5行目から
+COIN_TRAIL_LENGTH = 4
 DATA_DIR = Path(os.getenv("LOCALAPPDATA") or os.getenv("XDG_DATA_HOME") or Path.home() / ".local" / "share")
 RECORDS_PATH = DATA_DIR / "w11_SkiGame" / "records.sqlite3"
 
@@ -73,6 +76,7 @@ def create_state(field_width, field_height, rng, difficulty="normal"):
         "scroll_count": 0,    # コースが進んだ行数
         "score": 0,           # w11演習01で更新する
         "coins_collected": 0,
+        "coin_trail": deque(),
         "personal_bests": None,
         "level": 1,           # 100行進むごとに上昇
         "scroll_progress": 0.0,
@@ -90,14 +94,14 @@ def create_state(field_width, field_height, rng, difficulty="normal"):
         "shake_timer": 0.0,
     }
 
-    # 開始直後の画面は障害物なし。新しく現れるコースから木を生成する。
+    # 開始直後の画面には障害物や取得物を置かない。
     for _ in range(field_height):
         state["rows"].append(create_course_row(state, rng, with_tree=False))
     return state
 
 
 def create_course_row(state, rng, with_tree=True):
-    """コースを1行生成する。木や崖の生成は講師提供部分。"""
+    """新しい1行にコースの境界、障害物、取得物を配置する。"""
     width = state["field_width"]
     half = state["course_half_width"]
     target_half = max(MIN_COURSE_HALF_WIDTH, state["initial_half_width"] - (state["level"] - 1) * NARROW_PER_LEVEL)
@@ -113,32 +117,34 @@ def create_course_row(state, rng, with_tree=True):
 
     left = center - half
     right = center + half
+    if not with_tree:
+        return {"left": left, "right": right, "tree": None, "coin": None,
+                "snowball": None, "item": None}
+
+    # 縦または斜めの4枚を、1行につき1枚ずつ画面に送り込む。
+    if state["scroll_count"] % SECTION_ROWS == COIN_TRAIL_START:
+        step = rng.choice((-1, 0, 1))
+        start = center + rng.randint(-1, 1) - step * (COIN_TRAIL_LENGTH // 2)
+        state["coin_trail"].extend(start + i * step for i in range(COIN_TRAIL_LENGTH))
+    coin = state["coin_trail"].popleft() if state["coin_trail"] else None
+    available = [x for x in range(left + 3, right - 2) if x != coin]
+
     tree = None
     tree_rate = min(0.52, 0.23 + (state["level"] - 1) * 0.055)
     if state["difficulty"] == "hard":
         tree_rate = tree_rate * 1.5
-    if with_tree and rng.random() < tree_rate:
-        tree = rng.randint(left + 3, right - 3)
-
-    coin = None
-    coin_rate = 0.05
-    if with_tree and rng.random() < coin_rate:
-        coin = rng.randint(left + 3, right - 3)
-    if coin == tree:
-        coin = None
-        
-
-    # 初期画面には追加の障害物やアイテムも出さない。
-    occupied = {x for x in (tree, coin) if x is not None}
-    available = [x for x in range(left + 3, right - 2) if x not in occupied]
+    if rng.random() < tree_rate:
+        tree_spaces = [x for x in available if coin is None or abs(x - coin) > PICKUP_HALF_WIDTH]
+        tree = rng.choice(tree_spaces)
+        available.remove(tree)
     snowball = None
-    if with_tree and available and rng.random() < SNOWBALL_RATE:
+    if coin is None and available and rng.random() < SNOWBALL_RATE:
         snow_x = rng.choice(available)
         available.remove(snow_x)
         snowball = {"x": float(snow_x), "direction": rng.choice([-1, 1])}
 
     item = None
-    if with_tree and available and rng.random() < ITEM_RATE:
+    if available and rng.random() < ITEM_RATE:
         item = {"x": rng.choice(available), "kind": rng.choice(["S", "M", "+"])}
 
     return {
